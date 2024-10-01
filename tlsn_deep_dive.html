@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A deep dive into TLSNotary</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+        code {
+            background-color: #f4f4f4;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+        pre {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Diving deep into TLSN</h1>
+
+    <p><em>This document is an attempt to explain TLSNotary and its cryptographic underpinnings, DEAP. It also sheds light on the practical bottlenecks when using this system in production and outlines the future steps on the TLSNotary roadmap. A cooler and perhaps more appropriate title for the document could be "Diving Deep into DEAP," but "Diving Deep into TLSN" was chosen as it might resonate more broadly with the audience :)</em></p>
+
+    <p>TLS secures all connections on the internet today. In TLS, we have two parties: the client and the server. The first step in the TLS protocol is the TLS handshake, in which the client verifies the identity of the server by verifying their domain certificates and also generates a pair of symmetric keys that are used to encrypt further communication between the server and the client.</p>
+
+    <p>The use of symmetric keys for encryption prevents the client from forwarding the encrypted server response to a third-party verifier and convincing them about the authenticity of the response because the client also has the symmetric keys and thus can forge any arbitrary response allegedly coming from the server.</p>
+
+    <p><a href="https://docs.tlsnotary.org/">TLSNotary</a> presents a solution to the above problem by splitting the session key between the Prover and the Verifier (Notary). With only a partial session key, the Prover is unable to forge server responses. In TLSN, the Verifier and the Prover run the 2PC-TLS protocol between them and together emulate the client in the TLS protocol. At the end of the 2PC-TLS protocol, the Verifier is convinced about the authenticity of the server response.</p>
+
+    <h2>Simple 2PC-TLS protocol</h2>
+
+    <img src="https://hackmd.io/_uploads/HyW45FwfR.png" alt="garanti circuits diagram (2)">
+
+    <ol>
+        <li>Perform the 2PC-TLS handshake with the server. At the end of the handshake, the server has it's complete session keys. The prover and the verifier have a share of the session keys, <code>sk_p</code> and <code>sk_v</code> respectively.</li>
+        <li>Perform 2PC-Encryption to compute the encrypted request <code>C1</code> to the server.
+            <ul>
+                <li>Prover inputs: Plaintext <code>p</code>, <code>sk_p</code></li>
+                <li>Verifier inputs: <code>sk_v</code></li>
+                <li>Output: <code>AES-GCM(p, sk_p ⊕ sk_v)</code></li>
+            </ul>
+        </li>
+        <li>Send the encrypted request <code>C1</code> to the server.</li>
+        <li>The server returns an encrypted response <code>C2</code>.</li>
+        <li>Forward the encrypted request <code>C1</code>, <code>C2</code> to the Verifier.</li>
+        <li>The Verifier reveals their share of the secret key <code>sk_v</code> to the Prover.</li>
+        <li>The Prover generates a ZK proof that proves
+            <ul>
+                <li>They know (sk_c, p, r) such that
+                    <ul>
+                        <li>p encrypts to C1 under <code>sk_c</code></li>
+                        <li>r encrypts to C2 under <code>sk_c</code></li>
+                        <li><code>sk_c</code> is formed from <code>sk_p</code> and <code>sk_v</code></li>
+                    </ul>
+                </li>
+                <li>The prover also has the option to selectivel reveal parts of the plaintext request <code>p</code> and response <code>r</code> which the Verifier (Notary) attests to and makes the proof portable. Any third-party the trusts the Verifier (Notary) can verify the proof.</li>
+            </ul>
+        </li>
+    </ol>
+
+    <h3>Malicious Garbler</h3>
+
+    <p>The two-party computation in 2PC-TLS is performed using Garbled Circuits. zkPass has a great <a href="https://medium.com/zkpass/yaos-classical-garbled-circuits-4cbdbadf288e">blog</a> on Garbled circuits. Garbled circuits are secure against malicious evaluator but not secure against malicious garbler. If the function to be computed is <code>f</code> on Garbler's input <code>x</code> and Evaluator's input <code>y</code>, a malicious garbler can:</p>
+    <ul>
+        <li>Garble a different circuit <code>f_g</code></li>
+        <li>Feed a malicious input <code>x_g</code></li>
+        <li>Return malicious OT for the evaluator's input <code>y_g</code></li>
+    </ul>
+
+    <h3>Privacy Leakage</h3>
+
+    <p>Vanilla garbled circuits also suffer from the private input leakage attack vector. Essentially, the garbler could garble a different circuit <code>f_g</code> such that it leaks the evaluator's input <code>y</code> to them. Authenticated garbling schemes prevent these attack vectors but are costly in both compute and I/O.</p>
+
+    <h2>DEAP</h2>
+
+    <h3>Simple DEAP</h3>
+
+    <p>One solution for such attack vectors using the semi-honest garbled circuits is "Dual Execution". In these protocols, an honest original evaluator can garble the function <code>f</code> and let the original garbler, evaluate the circuit. To simplify, if Alice is Garbler and Bob is evaluator for the first execution, then Bob becomes the Garbler and Alice the Evaluator for the second execution. If the output of the first and the second execution match, then both the parties are satisfied about the correctness of the original evaluation and the output.</p>
+
+    <p>TLSN uses the Dual Execution With Assymetric Privacy (<a href="https://docs.tlsnotary.org/mpc/deap.html">DEAP</a>) scheme. In this scheme one of the parties has complete privacy while the other parties reveals their private inputs during the protocol, hence the "assymetric" privacy. This construction works for TLSN because after the TLS session is closed, the security of the protocol is not compromised if the Notary shares their keys with the Prover.</p>
+
+    <img src="https://hackmd.io/_uploads/SJWRDiOGA.png" alt="deap_simple_2">
+
+    <p>Above is a very simple diagram that explains DEAP. The function is executed twice thus "Dual exeuction". The verifier reveals their private inputs to the Prover after the initial phase, thus "Assymetric Privacy". The second exeuction proves:</p>
+    <ul>
+        <li>The correctness of function <code>f</code> executed in 2PC step</li>
+        <li>Correctness of OT of verifier's input <code>y</code> in 2PC step</li>
+        <li>Correctness of prover's inputs, i.e. existence of <code>x</code> that satisfies <code>f(x, y) -> z</code>. Note that this needs to be a ZK proof to preserve the privacy of <code>x</code></li>
+    </ul>
+
+    <p>The final check <code>z =? z_p</code> translates to <code>f(x, y) =? f_p (x_p, y_p)</code>. <code>f</code>, <code>y</code> are public and known to the verifier. For a complex function <code>f</code>, a malicious Prover can satisfy the equation only if they are able to predict <code>y</code>, which is a random value generated by the Verifier.</p>
+
+    <h3>Full DEAP</h3>
+
+    <h3>Notation</h3>
+
+    <ul>
+        <li><code>x</code> and <code>y</code> are Prover and Verifier's inputs, respectively.</li>
+        <li><code>[x]_P</code> and <code>[y]_P</code> are Prover and Verifier's encoded active inputs, respectively</li>
+        <li>G denotes a garbled circuit for computing f(x,y)=z, where:</li>
+        <li><code>Ev(G,[x],[y])=[z]</code></li>
+        <li><code>d</code> denotes output decoding information where <code>De(d,[v])=v</code></li>
+        <li><code>Δ</code> denotes the global offset of a garbled circuit (I don't completely understand the revlevance of it)</li>
+        <li><code>com</code> denotes a commitment</li>
+    </ul>
+
+    <img src="https://hackmd.io/_uploads/ry76cs_fR.png" alt="DAEP-marked">
+
+    <p>To reason about the above diagram, try replacing the 2PC step in simple DAEP with the detailed Garbled circuits step and the prove phase (second execution) with another Garbled circuits computation.</p>
+
+    <p>Important things to notice in DEAP</p>
+    <ul>
+        <li>Prover and Verifier both garble the same function f</li>
+        <li>Prover uploads Garbled circuit <code>G_P</code></li>
+        <li>Prover downloads Garbled circuit <code>G_V</code></li>
+        <li>An honest Prover will get the correct output of <code>f(x, y)</code> immediately at the end of the evaluation phase. Thus they can choose to delay the equality check phase</li>
+        <li>Prover evaluates the Verifier's Garbled circuit <code>G_V</code> and commits to the output <code>[z]_V</code> blinded using a random <code>r</code>, upon which the Verifier opens their garbling and reveals their key share. This allows the Prover to check that the garbling and OT were done correctly and that a potentially <strong>malicious verifier</strong> is not trying to extract the Prover's secret <code>x</code>. Once the Prover is convinced about the correctness of Verifier's garbling, it opens the commitment.</li>
+        <li><strong>Malicious Prover</strong>: If the Prover was malicious, the equality check will fail.</li>
+    </ul>
+
+    <p>Note that DEAP uses garbled circuits to generate the ZK proof. Read their <a href="https://docs.tlsnotary.org/mpc/deap.html#committed-oblivious-transfer">docs</a> to understand the reasoning.</p>
+
+    <p>DEAP is one of the core building blocks of the 2PC-TLS protocol. Next we can dive deeper into the individual phases of the TLS protocol and see how DEAP is used in each phase.</p>
+
+    <h2>Full 2PC-TLS protocol</h2>
+
+    <p>Similar to the vanilla TLS version, 2PC-TLS can also be divided into three sub-parts: handshake, encryption and decryption.</p>
+
+    <h3>2PC-TLS Handshake</h3>
+ 
+    <p>This is still largely a black box for me. I have a very high level understanding of how 2PC-TLS handshake works.  Hence skipped for now.</p>
+ 
+    <h3>2PC-TLS Encryption</h3>
+
+    <p>The 2PC-TLS encryption has two substeps:</p>
+    <ol>
+        <li>Computing the encryption of the plaintext
+            <ul>
+                <li>This is achieved using DEAP</li>
+                <li><code>f</code> is <code>AES-CTR</code> encryption function.</li>
+                <li>Prover's private inputs: <code>p</code> (Plaintext), <code>Kp</code> (Prover's private key)</li>
+                <li>Verifier's private inputs: <code>Kv</code> (Verifier's private key)</li>
+            </ul>
+        </li>
+        <li>Computing the MAC of the cyphertext
+            <ul>
+                <li>I don't completely understand this phase yet. Hence skipped for now.</li>
+            </ul>
+        </li>
+    </ol>
+
+    <h3>2PC-TLS Decryption</h3>
+
+    <p>The 2PC-TLS Decryption has three substeps</p>
+    <ol>
+        <li>Computing the MAC of the cyphertext
+            <ul>
+                <li>I don't completely understand this phase yet as well.</li>
+            </ul>
+        </li>
+        <li>Computing the decryption of ciphertext
+            <ul>
+                <li>This is achieved using DEAP</li>
+                <li>Since, DEAP reveals the output to both parties, and we don't want to reveal the raw response with private data to the Verifier, we apply a mask on the ciphertext</li>
+                <li><code>f</code> is <code>Enc(Kp ⊕ Kv, ctr) ⊕ z</code></li>
+                <li>Prover's private inputs: <code>Kp</code> (Prover's private key), <code>z</code> (encryption mask)</li>
+                <li>Verifier's private inputs: <code>Kv</code> (Verifier's private key)</li>
+                <li>Prover removes the mask from the output <code>ectr_z</code> to get the plaintext, i.e. <code>c ⊕ ectr_z ⊕ z = p</code>, where <code>ectr_z</code> is output of 2PC computation and <code>c</code> is ciphertext returned from the server</li>
+            </ul>
+        </li>
+        <li>Proving the validity of plaintext
+            <ul>
+                <li>The prover needs to prove the validity of [p]N to the Verifier and it does using one round of vanilla GC</li>
+            </ul>
+        </li>
+    </ol>
+
+    <img src="https://www.mermaidchart.com/raw/4b0b1f2e-1f30-4292-a8bb-d9e5922535ff?theme=light&version=v0.1&format=svg" alt="TLS_Decryption_Prove_P">
+
+    <h2>Implementation</h2>
+
+    <h3>Deferred Decryption</h3>
+
+    <p>In the 2PC-TLS decryption step, once the Verifier has verified the MAC of the ciphertext response, the Verifier is convinced about the authenticity of the response. And if the Prover doesn't want to decrypt the response in 2PC, then the Verifier could just reveal their share of the key to the Prover using which the Prover can decrypt the ciphertext response. Thus effectively skipping step 2 in 2PC-TLS decryption above. This is fine, because we only care about the "authenticity" of the response which is guaranteed by the MAC check. Also, this helps save a lot of bandwidth. <em>I'm yet to find a case where we might not need deferred decryption.</em></p>
+
+    <h3>Deferred Equality Check (ZK in MPC-TLS)</h3>
+
+    <p>The current implementation of TLSNotary defers the final equality check in DEAP for all the DEAP executions towards the end after the TLS session is closed. This is executed as the final step in MPC-TLS where all the equlity checks are done. Today, this "zk proof" is generated using Garbled circuits. As stated before, this equality check proves to the Verifier that all the garblings by the Prover were correct and there share of the secret key was not revealed prematurely.</p>
+
+    <h3>Bottlenecks</h3>
+    <p>Garbled circuits are bandwidth intensive. Since TLSN uses GC exetensively, TLSN is also a bandwidth-intensive protocol.</p>
+
+    <p>In MPC-TLS we perform AES-GCM using Garbled circuits in the following steps:</p>
+    <ul>
+        <li>2PC-Encryption (Setup phase)</li>
+        <li>2PC-Encryption (Equality chck phase; ZK using GC)</li>
+        <li>2PC-Decryption (Setup phase; Skipped if deferred decryption)</li>
+        <li>2PC-Decryption (Equality check phase; ZK using GC; Skipped if deferred decryption)</li>
+        <li>Proving validity of plaintext</li>
+    </ul>
+
+    <p>1 AES Block (16 bytes) is 6500 AND gates.<br>
+    In semi-honest 2PC that is DEAP, Half-gate GC costs 32 bytes/AND gate, so:</p>
+    <ul>
+        <li><code>=> 6500 * 32 => ~208kB/block</code></li>
+        <li>which means <code>(208kB/block) / (16 bytes/block) = ~13kB/byte</code></li>
+    </ul>
+
+    <p>Hence every byte in the plaintext contributes to 13kB of upload/download when encrypted/decrypted using GC. So, for a plaintext request of<code>lp</code> bytes and plaintext response of <code>lr</code> bytes</p>
+
+    <p>When Deferred decryption is <strong>NOT</strong> enabled:</p>
+    <ul>
+        <li>Net Prover upload:
+            <ul>
+                <li><code>[G]_p</code> during encryption setup phase + <code>[G]_p</code> during decryption setup phase</li>
+                <li><code>lp * 13</code> + <code>lr * 13</code> kB</li>
+                <li><code>(lp + lr) * 13</code> kB</li>
+            </ul>
+        </li>
+        <li>Net Prover download:
+            <ul>
+                <li><code>[G]_v</code> during encryption equality check phase + <code>[G]_v</code> during decryption equality check phase + <code>[G]_v</code> during proving plaintext response</li>
+                <li><code>lp * 13</code> + <code>lr * 13</code> + <code>lr * 13</code> kB</li>
+                <li><code>(lp + 2 * lr) * 13</code> kB</li>
+            </ul>
+        </li>
+    </ul>
+
+    <p>When Deferred decryption is enabled:</p>
+    <ul>
+        <li>Net Prover upload:
+            <ul>
+                <li><code>[G]_p</code> during encryption setup phase</li>
+                <li><code>lp * 13</code> kB</li>
+            </ul>
+        </li>
+        <li>Net Prover download:
+            <ul>
+                <li><code>[G]_v</code> during encryption equality check phase + <code>[G]_v</code> during proving plaintext response</li>
+                <li><code>lp * 13</code> +<code>lr * 13</code> kB</li>
+                <li><code>(lp + lr) * 13</code> kB</li>
+            </ul>
+        </li>
+    </ul>
+
+    <p>Note: We have not included the download/upload contributed due to 2PC-TLS handshake in the above calculations. I'm yet to understand 2PC-TLS in detail.</p>
+
+    <p>All these downloads and uploads can be preprocessed in the offline phase, i.e., done before the TLS connection is opened with the server. Once the TLS connection is opened with the server, the Prover and the Notary have around 10-30s before server timeout.</p>
+
+    <h2>Future</h2>
+
+    <h3>Authdecode</h3>
+
+    <p>This is a term that you will often see being thrown around for on-chain verification. It stands for "authenticated decoding". In the final step of 2PC-TLS decryption, the notary is convinced about the correctness of <code>[p]_N</code>. The Notary attest to <code>[p]_N</code>, but that means a third-party verifier verifying the attestation has to recompute the encodings and hash them. Because each byte is blown up to 8/128 bytes (not exactly sure), the hashing becomes too big to fit in a single block (or is too costly). The Authdecode protocol executed after the 2PC-TLS decryption, convinces the Verifier (Notary) about the correctness of the raw plaintext, which they can attest to. The plaintext length would be significantly smaller and can be hashed on-chain.</p>
+
+    <h3>Quicksilver</h3>
+
+    <p>Quicksilver will replace the use of Garbled circuits for ZK. It's a fast and cheap IZK protocol and would be run between the Prover and the Notary. This would mean we wouldn't have to use GC to prove the correct first execution and thus we would get rid of all downloads in the protocol. This is significant because even though download is comparitively "easier" than upload for Provers (users), download size is still signifcantly larger <code>(lp + 2*lr)*13</code> (or <code>(lp + lr) * 13</code>) compared to upload <code>(lp + lr)*13</code>, as generally <code>lr > lp</code>, i.e.  response is much bigger than the request.</p>
+
+    <p>After quicksilver with deferred decryption enabled:</p>
+    <ul>
+        <li>Net Prover upload:
+            <ul>
+                <li><code>[G]_p</code> during encryption setup phase</li>
+                <li><code>lp * 13</code> kB</li>
+            </ul>
+        </li>
+        <li>Net Prover download:
+            <ul>
+                <li><code>[G]_v</code> during encryption equality check phase + <code>[G]_v</code> during proving plaintext response</li>
+                <li><code>~= 0 (Minimal amount of download because doen using Quicksilver)</code></li>
+            </ul>
+        </li>
+    </ul>
+
+    <h2>Disclaimers</h2>
+
+    <p>This explanation of DEAP and TLSNotary is pretty broad and might not nail all the details. It's meant to give you a starting point to understand TLSNotary and DEAP. To get a complete understanding, please refer to their <a href="https://docs.tlsnotary.org">docs</a> and the respective papers.</p>
+    <ul>
+        <li><a href="https://eprint.iacr.org/2021/076.pdf">Quicksilver</a></li>
+        <li><a href="https://eprint.iacr.org/2013/073.pdf">ZK using Garbled circuits (JKO13)</a></li>
+    </ul>
+</body>
+</html>
