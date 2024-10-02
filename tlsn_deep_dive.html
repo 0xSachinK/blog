@@ -46,7 +46,7 @@
 
     <h2>Simple 2PC-TLS protocol</h2>
 
-    <img src="https://hackmd.io/_uploads/HyW45FwfR.png" alt="garanti circuits diagram (2)">
+    <img src="./images/tlsn_deep_dive/simple_2pc_tls.png" alt="Image of simple 2PC-TLS protocol">
 
     <ol>
         <li>Perform the 2PC-TLS handshake with the server. At the end of the handshake, the server has it's complete session keys. The prover and the verifier have a share of the session keys, <code>sk_p</code> and <code>sk_v</code> respectively.</li>
@@ -94,9 +94,9 @@
 
     <p>One solution for such attack vectors using the semi-honest garbled circuits is "Dual Execution". In these protocols, an honest original evaluator can garble the function <code>f</code> and let the original garbler, evaluate the circuit. To simplify, if Alice is Garbler and Bob is evaluator for the first execution, then Bob becomes the Garbler and Alice the Evaluator for the second execution. If the output of the first and the second execution match, then both the parties are satisfied about the correctness of the original evaluation and the output.</p>
 
-    <p>TLSN uses the Dual Execution With Assymetric Privacy (<a href="https://docs.tlsnotary.org/mpc/deap.html">DEAP</a>) scheme. In this scheme one of the parties has complete privacy while the other parties reveals their private inputs during the protocol, hence the "assymetric" privacy. This construction works for TLSN because after the TLS session is closed, the security of the protocol is not compromised if the Notary shares their keys with the Prover.</p>
+    <p>TLSN uses the Dual Execution With Assymetric Privacy (<a href="https://docs.tlsnotary.org/mpc/deap.html">DEAP</a>) scheme. In this scheme one of the parties has complete privacy while the other party reveals their private inputs during the protocol, hence the "assymetric" privacy. This construction works for TLSN because after the TLS session is closed, the security of the protocol is not compromised if the Notary shares their keys with the Prover.</p>
 
-    <img src="https://hackmd.io/_uploads/SJWRDiOGA.png" alt="deap_simple_2">
+    <img src="./images/tlsn_deep_dive/simple_deap.png" alt="Image of simple DEAP">
 
     <p>Above is a very simple diagram that explains DEAP. The function is executed twice thus "Dual exeuction". The verifier reveals their private inputs to the Prover after the initial phase, thus "Assymetric Privacy". The second exeuction proves:</p>
     <ul>
@@ -121,7 +121,7 @@
         <li><code>com</code> denotes a commitment</li>
     </ul>
 
-    <img src="https://hackmd.io/_uploads/ry76cs_fR.png" alt="DEAP-marked">
+    <img src="./images/tlsn_deep_dive/full_deap.png" alt="Full DEAP">
 
     <p>To reason about the above diagram, try replacing the 2PC step in simple DEAP with the detailed Garbled circuits step and the prove phase (second execution) with another Garbled circuits computation.</p>
 
@@ -192,7 +192,7 @@
         </li>
     </ol>
 
-    <img src="https://www.mermaidchart.com/raw/4b0b1f2e-1f30-4292-a8bb-d9e5922535ff?theme=light&version=v0.1&format=svg" alt="TLS_Decryption_Prove_P">
+    <img src="./images/tlsn_deep_dive/zk_after_mpc_tls.png" alt="ZK after MPC-TLS">
 
     <h2>Implementation</h2>
 
